@@ -44,10 +44,20 @@ Go to [Releases](../../releases) and download the latest `GridSurf.zip`. Extract
 
 ### Option 2: Build from source
 
+**Prerequisites:**
+- [.NET 8 SDK](https://dotnet.microsoft.com/download/dotnet/8.0) (not just runtime — you need the SDK to build)
+- Git
+
 ```bash
 git clone https://github.com/user/GridSurf.git
 cd GridSurf
+dotnet restore
 dotnet build -c Release
+```
+
+**Publish as standalone exe:**
+```bash
+dotnet publish -c Release -r win-x64 --self-contained true -o publish
 ```
 
 Run it:
