@@ -26,5 +26,5 @@ Write-Host ""
 Write-Host "Run:" -ForegroundColor Yellow
 Write-Host "  & `"$exe`""
 Write-Host ""
-Write-Host "Sessions: $($env:USERPROFILE)\.gridsurf\session1 .. session8" -ForegroundColor Gray
+Write-Host "Shared UDF: $($env:USERPROFILE)\.gridsurf\webview2 (profiles WA1..WA8)" -ForegroundColor Gray
 Write-Host ""

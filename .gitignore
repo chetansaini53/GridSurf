@@ -1,6 +1,9 @@
 bin/
 obj/
 dist/
+publish/
+publish-*/
+*.zip
 .vs/
 *.user
 *.suo

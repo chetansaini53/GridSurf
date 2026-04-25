@@ -29,26 +29,44 @@ public partial class MainWindow : Window
         "--process-per-site",
     ]);
 
-    private readonly string[] _sessionFolders = new string[MaxPanes];
     private readonly Grid[] _paneContainers = new Grid[MaxPanes];
     private readonly WebView2[] _views = new WebView2[MaxPanes];
     private readonly TextBox[] _urlBars = new TextBox[MaxPanes];
     private readonly bool[] _viewInitialized = new bool[MaxPanes];
+    private readonly bool[] _viewSuspended = new bool[MaxPanes];
+    private CoreWebView2Environment? _sharedEnv;
     private bool _loaded;
 
     public MainWindow()
     {
         InitializeComponent();
         SettingsStore.MigrateLegacyDir();
+        MaybeArchiveLegacySessions();
 
         for (var i = 0; i < MaxPanes; i++)
-        {
-            _sessionFolders[i] = Path.Combine(SettingsStore.BaseDir, $"session{i + 1}");
             BuildPaneUI(i);
-        }
 
         Loaded += MainWindow_Loaded;
         KeyDown += MainWindow_KeyDown;
+    }
+
+    private static void MaybeArchiveLegacySessions()
+    {
+        if (!SettingsStore.LegacyPerPaneSessionsExist()) return;
+        var msg =
+            "GridSurf v1.1 — Memory optimization upgrade\n\n" +
+            "Session storage has been reorganized to share Chromium processes across panes. " +
+            "This cuts RAM use roughly in half for 8 sessions.\n\n" +
+            "One-time impact: existing logins will be backed up to ~/.gridsurf/legacy-sessions-backup " +
+            "and you'll need to re-scan the QR for each WhatsApp pane once.\n\n" +
+            "Click OK to proceed, Cancel to exit (no data will be touched).";
+        var res = MessageBox.Show(msg, "GridSurf upgrade", MessageBoxButton.OKCancel, MessageBoxImage.Information);
+        if (res != MessageBoxResult.OK)
+        {
+            Environment.Exit(0);
+            return;
+        }
+        SettingsStore.ArchiveLegacyPerPaneSessions();
     }
 
     private void BuildPaneUI(int index)
@@ -99,21 +117,89 @@ public partial class MainWindow : Window
 
         ApplyLayout(settings.ViewCount);
         await InitActiveViewsAsync(settings);
+        await SyncPaneSuspensionAsync();
         _loaded = true;
+    }
+
+    private async Task SyncPaneSuspensionAsync()
+    {
+        for (var i = 0; i < MaxPanes; i++)
+        {
+            if (!_viewInitialized[i]) continue;
+            var visible = _paneContainers[i].Visibility == Visibility.Visible;
+            var wv2 = _views[i].CoreWebView2;
+            if (wv2 == null) continue;
+
+            if (visible && _viewSuspended[i])
+            {
+                try
+                {
+                    wv2.Resume();
+                    wv2.MemoryUsageTargetLevel = CoreWebView2MemoryUsageTargetLevel.Normal;
+                    _viewSuspended[i] = false;
+                    ScheduleResumeHealthCheck(i);
+                }
+                catch { /* if resume fails, force reload */ try { _views[i].Reload(); } catch { } _viewSuspended[i] = false; }
+            }
+            else if (!visible && !_viewSuspended[i])
+            {
+                try
+                {
+                    wv2.MemoryUsageTargetLevel = CoreWebView2MemoryUsageTargetLevel.Low;
+                    var ok = await wv2.TrySuspendAsync();
+                    _viewSuspended[i] = ok;
+                }
+                catch { /* swallow — not critical */ }
+            }
+        }
+    }
+
+    private void ScheduleResumeHealthCheck(int index)
+    {
+        var idx = index;
+        var timer = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromSeconds(6) };
+        timer.Tick += (_, _) =>
+        {
+            timer.Stop();
+            if (!_viewInitialized[idx]) return;
+            var wv2 = _views[idx].CoreWebView2;
+            if (wv2 == null) return;
+            try
+            {
+                var src = wv2.Source ?? "";
+                if (src.Contains("web.whatsapp.com", StringComparison.OrdinalIgnoreCase))
+                {
+                    _ = wv2.ExecuteScriptAsync("document.body && document.body.innerText.includes('Computer not connected') ? 'stale' : 'ok'")
+                        .ContinueWith(t =>
+                        {
+                            if (t.IsCompletedSuccessfully && t.Result?.Contains("stale") == true)
+                                Dispatcher.Invoke(() => { try { _views[idx].Reload(); } catch { } });
+                        });
+                }
+            }
+            catch { /* ignore */ }
+        };
+        timer.Start();
     }
 
     private async Task InitActiveViewsAsync(SettingsStore.Settings settings)
     {
-        var opts = new CoreWebView2EnvironmentOptions { AdditionalBrowserArguments = BrowserArgs };
+        if (_sharedEnv == null)
+        {
+            var envOpts = new CoreWebView2EnvironmentOptions { AdditionalBrowserArguments = BrowserArgs };
+            Directory.CreateDirectory(SettingsStore.SharedUdfDir);
+            _sharedEnv = await CoreWebView2Environment.CreateAsync(null, SettingsStore.SharedUdfDir, envOpts);
+        }
 
         for (var i = 0; i < MaxPanes; i++)
         {
             if (_paneContainers[i].Visibility != Visibility.Visible) continue;
             if (_viewInitialized[i]) continue;
 
-            Directory.CreateDirectory(_sessionFolders[i]);
-            var env = await CoreWebView2Environment.CreateAsync(null, _sessionFolders[i], opts);
-            await _views[i].EnsureCoreWebView2Async(env);
+            var ctrlOpts = _sharedEnv.CreateCoreWebView2ControllerOptions();
+            ctrlOpts.ProfileName = SettingsStore.ProfileNameFor(i);
+            ctrlOpts.IsInPrivateModeEnabled = false;
+            await _views[i].EnsureCoreWebView2Async(_sharedEnv, ctrlOpts);
 
             var wv2 = _views[i].CoreWebView2!;
             wv2.Settings.UserAgent = ChromeUA;
@@ -282,11 +368,16 @@ public partial class MainWindow : Window
 
         ApplyLayout(newSettings.ViewCount);
         await InitActiveViewsAsync(newSettings);
+        await SyncPaneSuspensionAsync();
 
         for (var i = 0; i < MaxPanes; i++)
         {
-            if (_paneContainers[i].Visibility == Visibility.Visible && _viewInitialized[i])
-                _views[i].CoreWebView2?.Navigate(SettingsStore.NormalizeUrl(newSettings.Urls[i]));
+            if (_paneContainers[i].Visibility != Visibility.Visible || !_viewInitialized[i]) continue;
+            var wv2 = _views[i].CoreWebView2;
+            if (wv2 == null) continue;
+            var target = SettingsStore.NormalizeUrl(newSettings.Urls[i]);
+            if (!string.Equals(wv2.Source, target, StringComparison.OrdinalIgnoreCase))
+                wv2.Navigate(target);
         }
     }
 }

@@ -17,7 +17,41 @@ internal static class SettingsStore
     internal static string BaseDir =>
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".gridsurf");
 
+    internal static string SharedUdfDir =>
+        Path.Combine(BaseDir, "webview2");
+
     private static string SettingsPath => Path.Combine(BaseDir, "settings.json");
+
+    internal static string ProfileNameFor(int paneIndex) => $"WA{paneIndex + 1}";
+
+    internal static bool LegacyPerPaneSessionsExist()
+    {
+        if (!Directory.Exists(BaseDir)) return false;
+        for (var i = 1; i <= MaxPanes; i++)
+        {
+            if (Directory.Exists(Path.Combine(BaseDir, $"session{i}"))) return true;
+        }
+        return false;
+    }
+
+    internal static void ArchiveLegacyPerPaneSessions()
+    {
+        if (!Directory.Exists(BaseDir)) return;
+        var archiveRoot = Path.Combine(BaseDir, "legacy-sessions-backup");
+        Directory.CreateDirectory(archiveRoot);
+        for (var i = 1; i <= MaxPanes; i++)
+        {
+            var src = Path.Combine(BaseDir, $"session{i}");
+            if (!Directory.Exists(src)) continue;
+            var dest = Path.Combine(archiveRoot, $"session{i}");
+            try
+            {
+                if (Directory.Exists(dest)) Directory.Delete(dest, true);
+                Directory.Move(src, dest);
+            }
+            catch { /* skip locked dirs; user can clean manually */ }
+        }
+    }
 
     internal sealed class Settings
     {
